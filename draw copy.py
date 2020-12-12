@@ -12,11 +12,11 @@ Author: Eric Jang
 import os
 import numpy as np
 import tensorflow_datasets as tfds
-import tensorflow.compat.v1 as tf
+import tensorflow as tf
 
 ## DODANE ##
-tf.disable_v2_behavior()
-tf.compat.v1.disable_eager_execution()
+# tf.disable_v2_behavior()
+# tf.compat.v1.disable_eager_execution()
 ## DODANE ##
 
 # from tensorflow.examples.tutorials import mnist
@@ -51,25 +51,27 @@ eps = 1e-8  # epsilon for numerical stability
 DO_SHARE = None  # workaround for variable_scope(reuse=True)
 
 
-x = tf.placeholder(tf.float32, shape=(batch_size, img_size))  # input (batch_size * img_size)
-
-e = tf.random_normal((batch_size, z_size), mean=0, stddev=1)  # Qsampler noise
-lstm_enc = tf.compat.v1.nn.rnn_cell.LSTMCell(
-    enc_size, state_is_tuple=True)  # encoder Op
-lstm_dec = tf.compat.v1.nn.rnn_cell.LSTMCell(
-    dec_size, state_is_tuple=True)  # decoder Op
-# lstm_enc = tf.keras.layers.LSTMCell(enc_size)
-# lstm_dec = tf.keras.layers.LSTMCell(dec_size)
+# x = tf.placeholder(tf.float32, shape=(batch_size, img_size))  # input (batch_size * img_size)
 
 
+e = tf.random.normal((batch_size, z_size), mean=0, stddev=1)  # Qsampler noise
+# lstm_enc = tf.compat.v1.nn.rnn_cell.LSTMCell(
+#     enc_size, state_is_tuple=True)  # encoder Op
+# lstm_dec = tf.compat.v1.nn.rnn_cell.LSTMCell(
+#     dec_size, state_is_tuple=True)  # decoder Op
+lstm_enc = tf.keras.layers.LSTMCell(enc_size)
+lstm_dec = tf.keras.layers.LSTMCell(dec_size)
+
+@tf.function
 def linear(x, output_dim):
     """
     affine transformation Wx+b
     assumes x.shape = (batch_size, num_features)
     """
-    w = tf.get_variable("w", [x.get_shape()[1], output_dim])
-    b = tf.get_variable("b", [output_dim],
-                        initializer=tf.constant_initializer(0.0))
+    w = tf.Variable(name='w', shape=[img_size, output_dim])
+    b = tf.Variable(name='b', initial_value=tf.zeros(shape=(output_dim))) #, shape=[output_dim], initial_value=tf.constant_initializer(0.0),
+    # w = tf.get_variable("w", [x.get_shape()[1], output_dim])
+    # b = tf.get_variable("b", [output_dim], initializer=tf.constant_initializer(0.0))
     return tf.matmul(x, w)+b
 
 
@@ -82,17 +84,17 @@ def filterbank(gx, gy, sigma2, delta, N):
     mu_x = tf.reshape(mu_x, [-1, N, 1])
     mu_y = tf.reshape(mu_y, [-1, N, 1])
     sigma2 = tf.reshape(sigma2, [-1, 1, 1])
-    Fx = tf.exp(-tf.square(a - mu_x) / (2*sigma2))
-    Fy = tf.exp(-tf.square(b - mu_y) / (2*sigma2))  # batch x N x B
+    Fx = tf.exp(-1*tf.square(a - mu_x) / (2*sigma2))
+    Fy = tf.exp(-1*tf.square(b - mu_y) / (2*sigma2))  # batch x N x B
     # normalize, sum over A and B dims
-    Fx = Fx/tf.maximum(tf.reduce_sum(Fx, 2, keep_dims=True), eps)
-    Fy = Fy/tf.maximum(tf.reduce_sum(Fy, 2, keep_dims=True), eps)
+    Fx = Fx/tf.maximum(tf.reduce_sum(Fx, 2, keepdims=True), eps)
+    Fy = Fy/tf.maximum(tf.reduce_sum(Fy, 2, keepdims=True), eps)
     return Fx, Fy
 
-
+@tf.function
 def attn_window(scope, h_dec, N):
-    with tf.variable_scope(scope, reuse=DO_SHARE):
-        params = linear(h_dec, 5)
+    # with tf.variable_scope(scope, reuse=DO_SHARE):
+    params = linear(h_dec, 5)
     # gx_,gy_,log_sigma2,log_delta,log_gamma=tf.split(1,5,params)
     gx_, gy_, log_sigma2, log_delta, log_gamma = tf.split(params, 5, 1)
     gx = (A+1)/2*(gx_+1)
@@ -126,7 +128,7 @@ read = read_attn if FLAGS.read_attn else read_no_attn
 
 ## ENCODE ##
 
-
+@tf.function
 def encode(state, input):
     """
     run LSTM
@@ -134,42 +136,42 @@ def encode(state, input):
     input = cat(read,h_dec_prev)
     returns: (output, new_state)
     """
-    with tf.variable_scope("encoder", reuse=DO_SHARE):
-        return lstm_enc(input, state)
+    # with tf.variable_scope("encoder", reuse=DO_SHARE):
+    return lstm_enc(input, state)
 
 ## Q-SAMPLER (VARIATIONAL AUTOENCODER) ##
 
-
+@tf.function
 def sampleQ(h_enc):
     """
     Samples Zt ~ normrnd(mu,sigma) via reparameterization trick for normal dist
     mu is (batch,z_size)
     """
-    with tf.variable_scope("mu", reuse=DO_SHARE):
-        mu = linear(h_enc, z_size)
-    with tf.variable_scope("sigma", reuse=DO_SHARE):
-        logsigma = linear(h_enc, z_size)
-        sigma = tf.exp(logsigma)
+    # with tf.variable_scope("mu", reuse=DO_SHARE):
+    mu = linear(h_enc, z_size)
+    # with tf.variable_scope("sigma", reuse=DO_SHARE):
+    logsigma = linear(h_enc, z_size)
+    sigma = tf.exp(logsigma)
     return (mu + sigma*e, mu, logsigma, sigma)
 
 ## DECODER ##
 
-
+@tf.function
 def decode(state, input):
-    with tf.variable_scope("decoder", reuse=DO_SHARE):
-        return lstm_dec(input, state)
+    # with tf.variable_scope("decoder", reuse=DO_SHARE):
+    return lstm_dec(input, state)
 
 ## WRITER ##
 
-
+@tf.function
 def write_no_attn(h_dec):
-    with tf.variable_scope("write", reuse=DO_SHARE):
-        return linear(h_dec, img_size)
+    # with tf.variable_scope("write", reuse=DO_SHARE):
+    return linear(h_dec, img_size)
 
-
+@tf.function
 def write_attn(h_dec):
-    with tf.variable_scope("writeW", reuse=DO_SHARE):
-        w = linear(h_dec, write_size)  # batch x (write_n*write_n)
+    # with tf.variable_scope("writeW", reuse=DO_SHARE):
+    w = linear(h_dec, write_size)  # batch x (write_n*write_n)
     N = write_n
     w = tf.reshape(w, [batch_size, N, N])
     Fx, Fy, gamma = attn_window("write", h_dec, write_n)
@@ -190,8 +192,10 @@ mus, logsigmas, sigmas = [0]*T, [0]*T, [0]*T
 # initial states
 h_dec_prev = tf.zeros((batch_size, dec_size))
 
-enc_state = lstm_enc.zero_state(batch_size, tf.float32)
-dec_state = lstm_dec.zero_state(batch_size, tf.float32)
+# enc_state = lstm_enc.zero_state(batch_size, tf.float32)
+# dec_state = lstm_dec.zero_state(batch_size, tf.float32)
+enc_state = lstm_enc.get_initial_state(batch_size=batch_size, dtype=tf.float32)
+dec_state = lstm_dec.get_initial_state(batch_size=batch_size, dtype=tf.float32)
 
 ## DRAW MODEL ##
 
@@ -211,7 +215,7 @@ for t in range(T):
 
 
 def binary_crossentropy(t, o):
-    return -(t*tf.log(o+eps) + (1.0-t)*tf.log(1.0-o+eps))
+    return -(t*tf.math.log(o+eps) + (1.0-t)*tf.math.log(1.0-o+eps))
 
 
 # reconstruction term appears to have been collapsed down to a single scalar value (rather than one per item in minibatch)
@@ -259,17 +263,18 @@ fetches.extend([Lx, Lz, train_op])
 Lxs = [0]*train_iters
 Lzs = [0]*train_iters
 
-sess = tf.InteractiveSession()
+# sess = tf.InteractiveSession()
 
-saver = tf.train.Saver()  # saves variables learned during training
-tf.global_variables_initializer().run()
+# saver = tf.train.Saver()  # saves variables learned during training
+# tf.global_variables_initializer().run()
 # saver.restore(sess, "/tmp/draw/drawmodel.ckpt") # to restore from model, uncomment this line
 
 for i in range(train_iters):
     # xtrain,_=train_data.batch(batch_size) # xtrain is (batch_size x img_size)
     xtrain = train_data.take(batch_size)
-    feed_dict = {x: xtrain}
-    results = sess.run(fetches, feed_dict)
+    # feed_dict = {x: xtrain}
+    # results = sess.run(fetches, feed_dict)
+
     Lxs[i], Lzs[i], _ = results
     if i % 100 == 0:
         print("iter=%d : Lx: %f Lz: %f" % (i, Lxs[i], Lzs[i]))
