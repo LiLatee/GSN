@@ -18,7 +18,7 @@ from skimage.transform import resize
 import numpy as np
 import os
 
-
+cat_path = 'cats_heads_64x64'
 tf.flags.DEFINE_string("data_dir", "", "")
 tf.flags.DEFINE_boolean("read_attn", True, "enable attention for reader")
 tf.flags.DEFINE_boolean("write_attn",True, "enable attention for writer")
@@ -256,7 +256,7 @@ print("TRAINING")
 # if not os.path.exists(data_directory):
 #     os.makedirs(data_directory)
 
-cat_path = 'out_aug_64x64'
+
 # train_data = mnist.input_data.read_data_sets(data_directory, one_hot=True).train # binarized (0-1) mnist data
 train_data = Memory(batch_size=100)
 train_data.load_images_from_folder(cat_path,90000)
