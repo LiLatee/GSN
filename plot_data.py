@@ -7,8 +7,8 @@ import numpy as np
 
 interactive=False # set to False if you want to write images to file
 
-if not interactive:
-	matplotlib.use('Agg') # Force matplotlib to not use any Xwindows backend.
+# if not interactive:
+# 	matplotlib.use('Agg') # Force matplotlib to not use any Xwindows backend.
 import matplotlib.pyplot as plt
 
 
@@ -37,9 +37,9 @@ def xrecons_grid(X,B,A):
 	return img
 
 if __name__ == '__main__':
-	prefix=sys.argv[1]
-	out_file=sys.argv[2]
-	[C,Lxs,Lzs]=np.load(out_file)
+	# prefix=sys.argv[1]
+	out_file=sys.argv[1]
+	[C,Lxs,Lzs]=np.load(out_file, allow_pickle=True)
 	T,batch_size,img_size=C.shape
 	X=1.0/(1.0+np.exp(-C)) # x_recons=sigmoid(canvas)
 	B=A=int(np.sqrt(img_size))
@@ -53,7 +53,7 @@ if __name__ == '__main__':
 			arr[t].set_yticks([])
 		else:
 			plt.matshow(img,cmap=plt.cm.gray)
-			imgname='%s_%d.png' % (prefix,t) # you can merge using imagemagick, i.e. convert -delay 10 -loop 0 *.png mnist.gif
+			imgname='%s_%d.png' % ("prefix",t) # you can merge using imagemagick, i.e. convert -delay 10 -loop 0 *.png mnist.gif
 			plt.savefig(imgname)
 			print(imgname)
 	f=plt.figure()
@@ -64,4 +64,4 @@ if __name__ == '__main__':
 	if interactive:
 		plt.show()
 	else:
-		plt.savefig('%s_loss.png' % (prefix))
+		plt.savefig('%s_loss.png' % ("prefix"))
