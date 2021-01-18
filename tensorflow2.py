@@ -8,51 +8,18 @@ import scipy.misc
 import numpy as np
 import os
 import time
+import random
+import glob
+import joblib
+from datetime import datetime
 
-results_dir = 'results/'
-if not os.path.exists(results_dir):
-    os.makedirs(results_dir)
-
-class Memory:
-    size = 0
-    images = np.array([])
-    batch_size = 0
-
-    def __init__(self, batch_size=64, img_size=64):
-        self.img_size = img_size
-        self.size = 0
-        self.batch_size = batch_size
-
-    def load_images_from_folder(self, folder, max_img_counnter):
-        images = []
-        img_c = 0
-        for filename in os.listdir(folder):
-            img = skimage.io.imread(os.path.join(folder, filename))
-            if img is not None:
-                gray_image = rgb2gray(img)
-                image_resized = resize(gray_image, (self.img_size, self.img_size),
-                                       anti_aliasing=True)
-#                 imgplot = plt.imshow(gray_image)
-#                 plt.show()
-#                 exit()
-                data = np.array(image_resized)
-                flattened = data.flatten()
-                images.append(flattened)
-                img_c += 1
-            if (img_c > max_img_counnter-1):
-                self.size = self.size+img_c
-                self.images = np.array(images).astype(np.float32)
-                return "DONE"
-
-        self.size = self.size+img_c
-        self.images = np.array(images)
-        return "DONE"  # "self.images"
 
 
 # merge images
-def merge(images, size):
+def merge(images, size, result_image_shape):
     h, w = images.shape[1], images.shape[2]
-    img = np.zeros((h * size[0], w * size[1]))
+    shape = (h * size[0], w * size[1], 3) if len(result_image_shape) == 3 else (h * size[0], w * size[1])
+    img = np.zeros(shape)
     for idx, image in enumerate(images):
         i = int(idx % size[1])
         j = int(idx / size[1])
@@ -60,11 +27,18 @@ def merge(images, size):
     return img
 
 # save image on local machine
-
-
 def ims(name, img):
     # print img[:10][:10]
-    im = Image.fromarray(img*255)
+
+    img = img*255
+    # print(img)
+    # print(img.shape)
+    # print(img.dtype)
+    img = img.astype(np.uint8)
+    print(img)
+    print(img.shape)
+    print(img.dtype)
+    im = Image.fromarray(img)
     im = im.convert('RGB')
     im.save(fp=name)
     # scipy.misc.toimage(img, cmin=0, cmax=1).save(name)
@@ -96,23 +70,24 @@ class Dense(tf.Module):
 
 
 class Model(tf.Module):
-    def __init__(self, name=None):
+    def __init__(self, img_flattened_size, name=None, batch_size=64, ):
         super(Model, self).__init__(name=name)
 
         # We set up the model parameters
         # ------------------------------
         # image width,height
-        self.img_size = 64
+        # self.img_size = 64
+        self.img_flattened_size = img_flattened_size
         # read glimpse grid width/height
         self.attention_n = 5
         # number of hidden units / output size in LSTM
         self.n_hidden = 256
         # QSampler output size
         self.n_z = 10
-        # MNIST generation sequence length
+        # generation sequence length
         self.sequence_length = 10
         # training minibatch size
-        self.batch_size = 64
+        self.batch_size = batch_size
 
         # self.data = tf.data.Dataset.from_tensor_slices(data).batch(
         #     batch_size=self.batch_size, drop_remainder=True).shuffle(len(data))
@@ -135,7 +110,7 @@ class Model(tf.Module):
         self.lstm_dec = tf.keras.layers.LSTMCell(self.n_hidden)
         self.d1 = Dense(self.n_hidden, self.n_z)
         self.d2 = Dense(self.n_hidden, self.n_z)
-        self.d3 = Dense(self.n_hidden, self.img_size**2)
+        self.d3 = Dense(self.n_hidden, self.img_flattened_size)
         # Define our state variables
         self.cs = [0] * self.sequence_length  # sequence of canvases
         self.mu, self.logsigma, self.sigma = [
@@ -182,7 +157,7 @@ class Model(tf.Module):
         # Construct the unrolled computational graph
         for t in range(self.sequence_length):
             # error image + original image
-            c_prev = tf.zeros((self.batch_size, self.img_size**2)
+            c_prev = tf.zeros((self.batch_size, self.img_flattened_size)
                               ) if t == 0 else self.cs[t-1]
             x_hat = x - tf.sigmoid(c_prev)
             # read the image
@@ -209,11 +184,7 @@ class Model(tf.Module):
 
 def loss(model, x):
     # Loss function
-    # model.cs[-1] = model.cs[-1]/100
     generated_images = tf.nn.sigmoid(model.cs[-1])
-    # print(tf.reduce_sum(x))
-    # print(model.cs[-1])
-    # print(model.z)
     generation_loss = tf.reduce_mean(-tf.reduce_sum(x * tf.math.log(
         1e-10 + generated_images) + (1-x) * tf.math.log(1e-10 + 1 - generated_images), 1))
 
@@ -231,9 +202,12 @@ def loss(model, x):
 
     return generation_loss, latent_loss, cost
 
+
 gl = []
 ll = []
-def train(model, xtrain, optimizer, i):
+
+
+def train(model, x, optimizer, i, result_image_shape, dirs_dict, sequence_length, number_of_steps_to_make_save):
     with tf.GradientTape() as t:
         cs = model(x)
         gen_loss, lat_loss, cost = loss(model, x)
@@ -245,46 +219,189 @@ def train(model, xtrain, optimizer, i):
     print(f"genloss {gen_loss} latloss {lat_loss}")
     gl.append(gen_loss)
     ll.append(lat_loss)
-    if i % 5000 == 0:
+    if i % number_of_steps_to_make_save == 0 and i != 0:
         cs = 1.0/(1.0+np.exp(-np.array(cs)))  # x_recons=sigmoid(canvas)
         print("ZAPIS")
         try:
-            tf.saved_model.save(model, results_dir + 'models/model-'+str(i))
-            save_losses(gl, ll, i)
+            # model.save(results_dir + 'modelsRGB/model-'+str(i))
+            # tf.saved_model.save(model, results_dir + 'modelsRGB/model-'+str(i))
+            joblib.dump(model, os.path.join(dirs_dict["models"], 'model-'+str(i)))
+            save_losses(gl, ll, i, dir=dirs_dict["losses"])
         except Exception as e:
             print("błąd zapisu: ", str(e))
-        for cs_iter in range(10):
+        for cs_iter in range(sequence_length):
             results = cs[cs_iter]
-            results_square = np.reshape(results, [-1, 64, 64])
+            results_square = np.reshape(results, [-1] + result_image_shape)
             print(results_square.shape)
-            img_to_save = merge(results_square, [8, 8])
-            ims(results_dir+"images/"+str(i)+"-step-"+str(cs_iter) + ".jpeg", img_to_save)
+            img_to_save = merge(results_square, [8, 8], result_image_shape)
 
-def save_losses(gl, ll, i):
-    losses_dir = results_dir + "losses"
-    if not os.path.exists(losses_dir):
-        os.makedirs(losses_dir)
-    out_file = os.path.join(losses_dir, "draw_data-"+str(i)+".npy")
+            img_save_path = os.path.join(dirs_dict["images"], str(i)+"-step-" + str(cs_iter) + ".jpeg" )
+            ims(img_save_path, img_to_save)
+
+
+def save_losses(gl, ll, i, dir):
+    out_file = os.path.join(dir, "draw_data-"+str(i)+".npy")
     np.save(out_file, [gl, ll])
     print("Outputs saved in file: %s" % out_file)
 
 
-imgs_path = "./out_aug_64x64"
-mem = Memory(img_size=64)
-mem.load_images_from_folder(imgs_path, 90000)
-print(type(mem.images))
-print(len(mem.images))
-print((mem.images[0].shape))
+def load_images_from_dir(dir, number, skip=0, gray=False):
+    images = []
+    ctr = 0
+    dir = dir + "/*.jpg"
+    all_images_paths = glob.glob(dir)
+    all_images_paths = all_images_paths[skip:]
+    random.shuffle(all_images_paths)
+    for filename in all_images_paths:
+        img = skimage.io.imread(filename)
+        if gray:
+            img = rgb2gray(img)
+            image_resized = resize(img, (64, 64, 1), anti_aliasing=True)
+        else:    
+            image_resized = resize(img, (64, 64, 3), anti_aliasing=True)
 
-data = tf.data.Dataset.from_tensor_slices(mem.images).shuffle(len(mem.images)).batch(batch_size=64, drop_remainder=True)
-m = Model()
-optimizer = tf.keras.optimizers.Adam(1e-4)
-c = 0
-for i in range(100):
-    for j, x in enumerate(data):
-        print('iter ', c)
-        try:
-            train(m, x, optimizer, c)
-        except Exception as e:
-            print("BLAD: ", e)
-        c += 1
+        data = np.array(image_resized)
+        flattened = data.flatten()
+        images.append(flattened)
+
+        ctr += 1
+        if ctr == number:
+            images = np.array(images).astype(np.float32)
+            return images
+        
+
+if __name__ == "__main__":
+    ## Utworzenie katalogów.
+    date = datetime.now().strftime("%d-%m-%Y %H:%M")
+    results_dir = f"results-{date}/"
+    images_dir = results_dir + 'images'
+    models_dir = results_dir + 'models'
+    losses_dir = results_dir + "losses"
+    needed_dirs = [results_dir, images_dir, models_dir, losses_dir]
+
+    for dir in needed_dirs:
+        if not os.path.exists(dir):
+            os.makedirs(dir)
+
+    dirs_dict ={
+        "results": results_dir,
+        "images": images_dir,
+        "models": models_dir,
+        "losses": losses_dir
+    }
+
+    ## Załadowanie zdjęć.
+    imgs_path = "./cats_heads_64x64"
+    is_gray_img = False
+    images = load_images_from_dir(dir=imgs_path, number=1000, skip=0, gray=is_gray_img)
+    result_image_shape = [64, 64] if is_gray_img else [64, 64, 3]
+    ## Uczenie.
+    data = tf.data.Dataset.from_tensor_slices(images).shuffle(len(images)).batch(batch_size=64, drop_remainder=True)
+    model = Model(img_flattened_size=images[0].shape[0], batch_size=64)
+    optimizer = tf.keras.optimizers.Adam(1e-4)
+    c = 0
+    for i in range(100):
+        for j, x in enumerate(data):
+            print('iter ', c)
+            try:
+                train(
+                    model, 
+                    x, 
+                    optimizer, 
+                    c, 
+                    result_image_shape=result_image_shape, 
+                    dirs_dict=dirs_dict, 
+                    sequence_length=model.sequence_length,
+                    number_of_steps_to_make_save=5000)
+            except Exception as e:
+                print("BLĄD: ", e)
+            c += 1
+
+
+
+
+
+
+### Ładowanie zdjęć za pomocą generatora. Jednak pojedynczy krok uczenia trwa sporo dłużej na tym.
+
+# imgs_path = "./cats_heads_64x64"
+# it = data_generator(images_dir="cats_heads_64x64")
+
+# def data_generator(images_dir):  
+#     images_dir = images_dir + "/*.jpg"
+#     all_images = glob.glob(images_dir)
+#     random.shuffle(all_images)
+#     for filename in all_images:
+#         img = skimage.io.imread(filename)
+#         # gray_image = rgb2gray(img)
+#         gray_image = img
+#         image_resized = resize(gray_image, (64, 64, 3),
+#                                 anti_aliasing=True)
+#         data = np.array(image_resized)
+#         flattened = data.flatten()
+#         yield flattened
+
+# def load_batch(batch_size=64):
+#     batch = []
+#     while len(batch) < batch_size:
+#         try:
+#             batch.append(next(it))
+#         except StopIteration:
+#             batch = None
+#             return batch
+#     return batch
+
+# m = Model()
+# # m = joblib.load("results/models/model-30")
+# optimizer = tf.keras.optimizers.Adam(1e-4)
+# c = 0
+# for i in range(100):
+#     while True:
+#         print('iter ', c)
+#         batch = load_batch(batch_size=64)
+#         batch = np.array(batch).astype(np.float32)
+#         batch = tf.data.Dataset.from_tensor_slices(batch).batch(batch_size=64, drop_remainder=True)
+#         if batch is None:
+#             break
+
+#         try:
+#             for x in batch:
+#                 train(m, x, optimizer, c)
+#         except Exception as e:
+#             print("BLAD: ", e)
+#         c += 1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# imgs_path = "./cats_heads_64x64"
+# mem = Memory(img_size=64)
+# mem.load_images_from_folder(imgs_path, 3000)
+# print(type(mem.images))
+# print(len(mem.images))
+# print((mem.images[0].shape))
+
+# data = tf.data.Dataset.from_tensor_slices(mem.images).shuffle(
+#     len(mem.images)).batch(batch_size=64, drop_remainder=True)
+# m = Model()
+# # m = tf.keras.models.load_model("results/modelsRGB/model-100")
+# optimizer = tf.keras.optimizers.Adam(1e-4)
+# c = 0
+# for i in range(100):
+#     for j, x in enumerate(data):
+#         print('iter ', c)
+#         # try:
+#         train(m, x, optimizer, c)
+#         # except Exception as e:
+#         #     print("BLAD: ", e)
+#         c += 1
