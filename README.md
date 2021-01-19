@@ -4,3 +4,8 @@ Code used to cut heads of cats and make some data augmentation is [here](https:/
 
 The code is based on the work of [Eric Jang](https://blog.evjang.com/2016/06/understanding-and-implementing.html "Eric Jang") and [Samuel Noriega`s code](https://medium.com/3blades-blog/draw-a-recurrent-neural-network-for-image-generation-725b39ef824f "Samuel Noriega'c code"), who cleaned it up.
 We are also in the process of adjusting the code to the Tensorflow 2.x, because the original implementation was done in Tensorflow 1.x.
+
+## Results of reimplementation in Tensorflow 2.x
+| With Attention RGB  | Without Attention Gray |
+| ------------- | ------------- |
+| <img src="https://imgur.com/6TOkMFC" width="100%"> | <img src="https://imgur.com/nVKaYhw" width="100%"> |
