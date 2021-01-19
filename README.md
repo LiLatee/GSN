@@ -8,4 +8,4 @@ We are also in the process of adjusting the code to the Tensorflow 2.x, because 
 ## Results of reimplementation in Tensorflow 2.x
 | Without Attention RGB  | With Attention Gray |
 | ------------- | ------------- |
-| <img src="https://imgur.com/6TOkMFC.gif" width="70%"> | <img src="https://imgur.com/nVKaYhw.gif" width="70%"> |
+| <img src="https://imgur.com/6TOkMFC.gif" width="70%" class="center> | <img src="https://imgur.com/nVKaYhw.gif" width="70%" class="center> |
