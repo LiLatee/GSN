@@ -14,11 +14,11 @@ import joblib
 from datetime import datetime
 
 
-
 # merge images
 def merge(images, size, result_image_shape):
     h, w = images.shape[1], images.shape[2]
-    shape = (h * size[0], w * size[1], 3) if len(result_image_shape) == 3 else (h * size[0], w * size[1])
+    shape = (h * size[0], w * size[1],
+             3) if len(result_image_shape) == 3 else (h * size[0], w * size[1])
     img = np.zeros(shape)
     for idx, image in enumerate(images):
         i = int(idx % size[1])
@@ -27,17 +27,13 @@ def merge(images, size, result_image_shape):
     return img
 
 # save image on local machine
+
+
 def ims(name, img):
     # print img[:10][:10]
 
     img = img*255
-    # print(img)
-    # print(img.shape)
-    # print(img.dtype)
     img = img.astype(np.uint8)
-    print(img)
-    print(img.shape)
-    print(img.dtype)
     im = Image.fromarray(img)
     im = im.convert('RGB')
     im.save(fp=name)
@@ -70,38 +66,21 @@ class Dense(tf.Module):
 
 
 class Model(tf.Module):
-    def __init__(self, img_flattened_size, name=None, batch_size=64, ):
+    def __init__(self, img_shape, attention_n, n_hidden, n_z, sequence_length, name=None, batch_size=64, with_attention=False):
         super(Model, self).__init__(name=name)
 
         # We set up the model parameters
         # ------------------------------
-        # image width,height
-        # self.img_size = 64
-        self.img_flattened_size = img_flattened_size
-        # read glimpse grid width/height
-        self.attention_n = 5
-        # number of hidden units / output size in LSTM
-        self.n_hidden = 256
-        # QSampler output size
-        self.n_z = 10
-        # generation sequence length
-        self.sequence_length = 10
-        # training minibatch size
+        assert img_shape[0] == img_shape[1]
+        self.img_size = img_shape[0]
+        self.img_channels = img_shape[2] if len(img_shape) == 3 else 1
+        self.img_flattened_size = self.img_size * self.img_size * self.img_channels
+        self.attention_n = attention_n
+        self.n_hidden = n_hidden
+        self.n_z = n_z
+        self.sequence_length = sequence_length
         self.batch_size = batch_size
-
-        # self.data = tf.data.Dataset.from_tensor_slices(data).batch(
-        #     batch_size=self.batch_size, drop_remainder=True).shuffle(len(data))
-        # # First we download the MNIST dataset into our local machine.
-        # train_size = 60000
-        # (train_images, _), (test_images, _) = tf.keras.datasets.mnist.load_data()
-        # # self.mnist = tfds.load("mnist")['train']
-
-        # self.mnist = tf.data.Dataset.from_tensor_slices(
-        #     preprocess_images(train_images)).shuffle(train_size)
-
-        # print("------------------------------------")
-        # print("MNIST Dataset Succesufully Imported")
-        # print("------------------------------------")
+        self.with_attention = with_attention
 
         # Build our model
         self.e = tf.random.normal(
@@ -110,7 +89,18 @@ class Model(tf.Module):
         self.lstm_dec = tf.keras.layers.LSTMCell(self.n_hidden)
         self.d1 = Dense(self.n_hidden, self.n_z)
         self.d2 = Dense(self.n_hidden, self.n_z)
-        self.d3 = Dense(self.n_hidden, self.img_flattened_size)
+        if with_attention:
+            self.dense_readA = Dense(self.n_hidden, self.attention_n)
+            self.dense_writeAW = Dense(self.n_hidden, self.attention_n*self.attention_n)
+            self.dense_writeA = Dense(self.n_hidden, self.attention_n)
+
+            self.write = self.write_attention
+            self.read = self.read_attention
+        else:
+            self.d3 = Dense(self.n_hidden, self.img_flattened_size)
+            self.write = self.write_basic
+            self.read = self.read_basic
+
         # Define our state variables
         self.cs = [0] * self.sequence_length  # sequence of canvases
         self.mu, self.logsigma, self.sigma = [
@@ -153,6 +143,87 @@ class Model(tf.Module):
         decoded_image_portion = self.d3(hidden_layer)
         return decoded_image_portion
 
+#########################################################################################
+## Methods used if attention mechanism is on.
+    # locate where to put attention filters on hidden layers
+    def attn_window(self, scope, h_dec):
+        if scope == "read":
+            parameters = self.dense_readA(h_dec)
+        elif scope == "write":
+            parameters = self.dense_writeA(h_dec)
+        # center of 2d gaussian on a scale of -1 to 1
+        gx_, gy_, log_sigma2, log_delta, log_gamma = tf.split(
+            value=parameters, num_or_size_splits=5, axis=1)
+
+        # move gx/gy to be a scale of -imgsize to +imgsize
+        gx = (self.img_size+1)/2 * (gx_ + 1)
+        gy = (self.img_size+1)/2 * (gy_ + 1)
+
+        sigma2 = tf.exp(log_sigma2)
+        # distance between patches
+        delta = (self.img_size - 1) / (self.attention_n-1) * tf.exp(log_delta)
+        # returns [Fx, Fy, gamma]
+        return self.filterbank(gx, gy, sigma2, delta) + (tf.exp(log_gamma),)
+
+    # Construct patches of gaussian filters
+    def filterbank(self, gx, gy, sigma2, delta):
+        # 1 x N, look like [[0,1,2,3,4]]
+        grid_i = tf.reshape(
+            tf.cast(tf.range(self.attention_n), tf.float32), [1, -1])
+        # individual patches centers
+        mu_x = gx + (grid_i - self.attention_n/2 - 0.5) * delta
+        mu_y = gy + (grid_i - self.attention_n/2 - 0.5) * delta
+        mu_x = tf.reshape(mu_x, [-1, self.attention_n, 1])
+        mu_y = tf.reshape(mu_y, [-1, self.attention_n, 1])
+        # 1 x 1 x imgsize, looks like [[[0,1,2,3,4,...,27]]]
+        im = tf.reshape(
+            tf.cast(tf.range(self.img_size), tf.float32), [1, 1, -1])
+        # im2 = tf.reshape(
+        #     tf.cast(tf.range(self.img_size), tf.float32), [1, 1, -1])
+        # list of gaussian curves for x and y
+        sigma2 = tf.reshape(sigma2, [-1, 1, 1])
+        Fx = tf.exp(tf.negative(tf.square((im - mu_x) / (2*sigma2))))
+        Fy = tf.exp(tf.negative(tf.square((im - mu_y) / (2*sigma2))))
+        # normalize area-under-curve
+        Fx = Fx / tf.maximum(tf.reduce_sum(Fx, 2, keepdims=True), 1e-8)
+        Fy = Fy / tf.maximum(tf.reduce_sum(Fy, 2, keepdims=True), 1e-8)
+        return Fx, Fy
+
+    # read operation with attention
+    def read_attention(self, x, x_hat, h_dec_prev):
+        Fx, Fy, gamma = self.attn_window("read", h_dec_prev)
+        # apply parameters for patch of gaussian filters
+
+        def filter_img(img, Fx, Fy, gamma):
+            Fxt = tf.transpose(Fx, perm=[0, 2, 1])
+            if self.img_channels == 3:
+                img = tf.reshape(img, [-1, self.img_size, self.img_size, 3])
+            elif self.img_channels == 1:
+                img = tf.reshape(img, [-1, self.img_size, self.img_size])
+
+            # apply the gaussian patches
+            glimpse = tf.raw_ops.BatchMatMul(
+                x=Fy, y=tf.raw_ops.BatchMatMul(x=img, y=Fxt))
+            glimpse = tf.reshape(glimpse, [-1, self.attention_n**2])
+            # scale using the gamma parameter
+            return glimpse * tf.reshape(gamma, [-1, 1])
+
+        x = filter_img(x, Fx, Fy, gamma)
+        x_hat = filter_img(x_hat, Fx, Fy, gamma)
+        return tf.concat([x, x_hat], 1)
+
+    # write operation with attention
+    def write_attention(self, hidden_layer):
+        w = self.dense_writeAW(hidden_layer)
+        w = tf.reshape(
+            w, [self.batch_size, self.attention_n, self.attention_n])
+        Fx, Fy, gamma = self.attn_window("write", hidden_layer)
+        Fyt = tf.transpose(Fy, perm=[0, 2, 1])
+        wr = tf.linalg.matmul(a=Fyt, b=tf.linalg.matmul(a=w, b=Fx))
+        wr = tf.reshape(wr, [self.batch_size, self.img_size*self.img_size])  # KOLOR?
+        return wr * tf.reshape(1.0/gamma, [-1, 1])
+#########################################################################################
+
     def __call__(self, x):
         # Construct the unrolled computational graph
         for t in range(self.sequence_length):
@@ -161,7 +232,8 @@ class Model(tf.Module):
                               ) if t == 0 else self.cs[t-1]
             x_hat = x - tf.sigmoid(c_prev)
             # read the image
-            r = self.read_basic(x, x_hat, self.h_dec_prev)
+            # r = self.read_basic(x, x_hat, self.h_dec_prev)
+            r = self.read(x, x_hat, self.h_dec_prev)
             # sanity check
             # print(r.get_shape())
             # encode to guass distribution
@@ -177,7 +249,8 @@ class Model(tf.Module):
             # sanity check
             # print(self.h_dec.get_shape())
             # map from hidden layer
-            self.cs[t] = c_prev + self.write_basic(self.h_dec)
+            # self.cs[t] = c_prev + self.write_basic(self.h_dec)
+            self.cs[t] = c_prev + self.write(self.h_dec)
             self.h_dec_prev = self.h_dec
         return self.cs
 
@@ -220,22 +293,30 @@ def train(model, x, optimizer, i, result_image_shape, dirs_dict, sequence_length
     gl.append(gen_loss)
     ll.append(lat_loss)
     if i % number_of_steps_to_make_save == 0 and i != 0:
-        cs = 1.0/(1.0+np.exp(-np.array(cs)))  # x_recons=sigmoid(canvas)
+        # for cs_iter in range(sequence_length):
+        #     np.savetxt(f'tests/przed/{cs_iter}.txt', np.array(cs[cs_iter]), delimiter=',')
+        # cs = 1.0/(1.0+np.exp(-np.array(cs)))  # x_recons=sigmoid(canvas)
+        cs = tf.math.sigmoid(np.array(cs))
+        print("="*100)
+        print(cs)
         print("ZAPIS")
         try:
             # model.save(results_dir + 'modelsRGB/model-'+str(i))
             # tf.saved_model.save(model, results_dir + 'modelsRGB/model-'+str(i))
-            joblib.dump(model, os.path.join(dirs_dict["models"], 'model-'+str(i)))
+            joblib.dump(model, os.path.join(
+                dirs_dict["models"], 'model-'+str(i)))
             save_losses(gl, ll, i, dir=dirs_dict["losses"])
         except Exception as e:
             print("błąd zapisu: ", str(e))
         for cs_iter in range(sequence_length):
             results = cs[cs_iter]
+            # np.savetxt(f'tests/po/{cs_iter}.txt', results, delimiter=',')
             results_square = np.reshape(results, [-1] + result_image_shape)
             print(results_square.shape)
             img_to_save = merge(results_square, [8, 8], result_image_shape)
 
-            img_save_path = os.path.join(dirs_dict["images"], str(i)+"-step-" + str(cs_iter) + ".jpeg" )
+            img_save_path = os.path.join(dirs_dict["images"], str(
+                i)+"-step-" + str(cs_iter) + ".png")
             ims(img_save_path, img_to_save)
 
 
@@ -245,7 +326,7 @@ def save_losses(gl, ll, i, dir):
     print("Outputs saved in file: %s" % out_file)
 
 
-def load_images_from_dir(dir, number, skip=0, gray=False):
+def load_images_from_dir(dir, number, skip=0, gray=False, img_size=64):
     images = []
     ctr = 0
     dir = dir + "/*.jpg"
@@ -256,9 +337,11 @@ def load_images_from_dir(dir, number, skip=0, gray=False):
         img = skimage.io.imread(filename)
         if gray:
             img = rgb2gray(img)
-            image_resized = resize(img, (64, 64, 1), anti_aliasing=True)
-        else:    
-            image_resized = resize(img, (64, 64, 3), anti_aliasing=True)
+            image_resized = resize(
+                img, (img_size, img_size, 1), anti_aliasing=True)
+        else:
+            image_resized = resize(
+                img, (img_size, img_size, 3), anti_aliasing=True)
 
         data = np.array(image_resized)
         flattened = data.flatten()
@@ -267,11 +350,29 @@ def load_images_from_dir(dir, number, skip=0, gray=False):
         ctr += 1
         if ctr == number:
             images = np.array(images).astype(np.float32)
-            return images
-        
+            return images, img.shape
+
 
 if __name__ == "__main__":
-    ## Utworzenie katalogów.
+    ## Parameters
+    learning_rate = 1e-4
+    batch_size = 64
+    img_size = 64 # img_size = width = height
+    is_gray_img = True
+    # read glimpse grid width/height
+    attention_n = 5
+    # number of hidden units / output size in LSTM
+    n_hidden = 256
+    # QSampler output size
+    n_z = 30
+    # generation sequence length
+    sequence_length = 10
+    with_attention = True
+    
+
+    result_image_shape = [img_size, img_size] if is_gray_img else [img_size, img_size, 3]
+
+    ## Creating directories.
     date = datetime.now().strftime("%d-%m-%Y %H:%M")
     results_dir = f"results-{date}/"
     images_dir = results_dir + 'images'
@@ -283,51 +384,58 @@ if __name__ == "__main__":
         if not os.path.exists(dir):
             os.makedirs(dir)
 
-    dirs_dict ={
+    dirs_dict = {
         "results": results_dir,
         "images": images_dir,
         "models": models_dir,
         "losses": losses_dir
     }
 
-    ## Załadowanie zdjęć.
+    # Load images.
     imgs_path = "./cats_heads_64x64"
-    is_gray_img = False
-    images = load_images_from_dir(dir=imgs_path, number=1000, skip=0, gray=is_gray_img)
-    result_image_shape = [64, 64] if is_gray_img else [64, 64, 3]
-    ## Uczenie.
-    data = tf.data.Dataset.from_tensor_slices(images).shuffle(len(images)).batch(batch_size=64, drop_remainder=True)
-    model = Model(img_flattened_size=images[0].shape[0], batch_size=64)
-    optimizer = tf.keras.optimizers.Adam(1e-4)
+    images, imgs_source_shape = load_images_from_dir(
+        dir=imgs_path, number=90000, skip=0, gray=is_gray_img)
+
+    
+    
+    # Learning.
+    data = tf.data.Dataset.from_tensor_slices(images).shuffle(
+        len(images)).batch(batch_size=batch_size, drop_remainder=True)
+
+    model = Model(
+        img_shape=imgs_source_shape, 
+        batch_size=batch_size, 
+        n_hidden=n_hidden,
+        attention_n=attention_n,
+        n_z=n_z,
+        sequence_length=sequence_length,
+        with_attention=with_attention)
+    optimizer = tf.keras.optimizers.Adam(learning_rate)
     c = 0
     for i in range(100):
         for j, x in enumerate(data):
             print('iter ', c)
-            try:
-                train(
-                    model, 
-                    x, 
-                    optimizer, 
-                    c, 
-                    result_image_shape=result_image_shape, 
-                    dirs_dict=dirs_dict, 
-                    sequence_length=model.sequence_length,
-                    number_of_steps_to_make_save=5000)
-            except Exception as e:
-                print("BLĄD: ", e)
+            # try:
+            train(
+                model,
+                x,
+                optimizer,
+                c,
+                result_image_shape=result_image_shape,
+                dirs_dict=dirs_dict,
+                sequence_length=model.sequence_length,
+                number_of_steps_to_make_save=5000)
+            # except Exception as e:
+            #     print("BLĄD: ", e)
             c += 1
 
 
-
-
-
-
-### Ładowanie zdjęć za pomocą generatora. Jednak pojedynczy krok uczenia trwa sporo dłużej na tym.
+# Ładowanie zdjęć za pomocą generatora. Jednak pojedynczy krok uczenia trwa sporo dłużej na tym.
 
 # imgs_path = "./cats_heads_64x64"
 # it = data_generator(images_dir="cats_heads_64x64")
 
-# def data_generator(images_dir):  
+# def data_generator(images_dir):
 #     images_dir = images_dir + "/*.jpg"
 #     all_images = glob.glob(images_dir)
 #     random.shuffle(all_images)
@@ -370,18 +478,6 @@ if __name__ == "__main__":
 #         except Exception as e:
 #             print("BLAD: ", e)
 #         c += 1
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # imgs_path = "./cats_heads_64x64"
