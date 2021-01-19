@@ -6,6 +6,6 @@ The code is based on the work of [Eric Jang](https://blog.evjang.com/2016/06/und
 We are also in the process of adjusting the code to the Tensorflow 2.x, because the original implementation was done in Tensorflow 1.x.
 
 ## Results of reimplementation in Tensorflow 2.x
-| With Attention RGB  | Without Attention Gray |
+| Without Attention RGB  | With Attention Gray |
 | ------------- | ------------- |
 | <img src="https://imgur.com/6TOkMFC.gif" width="70%"> | <img src="https://imgur.com/nVKaYhw.gif" width="70%"> |
